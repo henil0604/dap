@@ -1,0 +1,71 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+    provider = "prisma-client-js"
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+model User {
+    username String @id
+
+    createdAt DateTime @default(now())
+
+    directories Directory[]
+    files       File[]
+}
+
+model Directory {
+    id String @id @default(cuid())
+
+    name String
+
+    files          File[]
+    subDirectories Directory[] @relation("SubDirectory")
+
+    parentDirectory   Directory? @relation("SubDirectory", fields: [parentDirectoryId], references: [id])
+    parentDirectoryId String?
+
+    createdAt DateTime @default(now())
+
+    owner         User   @relation(fields: [ownerUsername], references: [username])
+    ownerUsername String
+}
+
+model File {
+    id String @id
+
+    name String
+    hash String
+    size Int
+
+    chunks Chunk[]
+
+    parentDirectory   Directory? @relation(fields: [parentDirectoryId], references: [id])
+    parentDirectoryId String?
+
+    owner         User?   @relation(fields: [ownerUsername], references: [username])
+    ownerUsername String?
+
+    createdAt DateTime @default(now())
+}
+
+model Chunk {
+    id   String @id
+    hash String
+
+    index Int
+    size  Int
+
+    file   File   @relation(fields: [fileId], references: [id])
+    fileId String
+
+    createdAt DateTime @default(now())
+}

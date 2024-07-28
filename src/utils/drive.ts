@@ -4,7 +4,6 @@ import { driveQueue } from "./queue";
 import { CONST } from "@/const";
 import { Readable } from "stream";
 import progress_stream from "progress-stream";
-import fs from "node:fs";
 import { chunkString } from "@/utils/chunkString";
 import { ascii } from "@/utils/ascii";
 import { throttleAll } from "promise-throttle-all";
@@ -266,7 +265,6 @@ export class Drive {
     );
 
     return {
-      driveFolderId: parentDirectoryId,
       id: options.id,
       chunks: uploadResponse.map((chunk) => ({
         error: chunk.error,
