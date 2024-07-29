@@ -11,3 +11,5 @@ export const prisma =
   });
 
 if (NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+
+export { type Prisma } from "@prisma/client";

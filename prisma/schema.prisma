@@ -43,7 +43,6 @@ model File {
     id String @id
 
     name String
-    hash String
     size Int
 
     chunks Chunk[]
@@ -58,8 +57,7 @@ model File {
 }
 
 model Chunk {
-    id   String @id
-    hash String
+    id String @id
 
     index Int
     size  Int

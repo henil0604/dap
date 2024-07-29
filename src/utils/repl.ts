@@ -6,7 +6,7 @@ import { User } from "@/utils/user";
 import chalk from "chalk";
 import { fzf } from "./fzf";
 import { store } from "./store";
-import { hash } from "./crypto";
+import { hash, hashFile } from "./crypto";
 import Path from "node:path";
 import { ascii } from "./ascii";
 import cliProgress from "cli-progress";
@@ -122,122 +122,94 @@ async function uploadProcess(user: User) {
   sp.message("extracting data from file");
 
   sp.stop();
-  const fileData = await fs.promises.readFile(filePath, "utf8");
-  const fileHash = hash(fileData);
+  const fileStat = await fs.promises.stat(filePath);
+  const id = await user.drive.generateId();
 
   log.info(`File: ${filePath}`);
-  log.info(`Hash: ${fileHash}`);
   log.info(`PID: ${process.pid}`);
+  log.info(`ID: ${id}`);
+  log.info(`Size: ${bytes.format(fileStat.size)}`);
   log.info("");
-  const id = await user.drive.generateId();
 
   if (!id) {
     log.error("Failed to generate ID");
     return;
   }
 
-  const progressBar = new cliProgress.MultiBar(
+  const progressBar = new cliProgress.SingleBar(
     {
       clearOnComplete: false,
       hideCursor: false,
       format:
-        "{index} | {hash} | {bar} | {value}% | {uploadedSize}/{totalSize} | SPD: {speed}/s",
+        "{bar} | {value}% | {uploadedSize}/{totalSize} | {uploadedChunks}/{totalChunks} | SPD: {speed}/s ",
     },
     cliProgress.Presets.rect
   );
 
-  const chunkProgressBars = new Map<number, cliProgress.SingleBar>();
-
-  const mainProgress = progressBar.create(
-    100,
-    0,
-    {
-      hash: fileHash.slice(0, 6),
-      totalSize: bytes.format(fileData.length),
-      uploadedSize: bytes.format(0),
-      speed: bytes.format(0),
-    },
-    {
-      format: "{hash} | {bar} | {value}% | {uploadedSize}/{totalSize}",
-    }
-  );
-
-  mainProgress.update(0);
-
   let totalBytesUploaded = 0;
+  let totalChunksUploaded = 0;
+
+  sp.start("chunking file");
+
+  const startTime = Date.now();
 
   const uploadResponse = await user.drive.createFile({
-    data: fileData,
+    filePath: filePath,
     id,
+    onChunkingProgress: (data) => {
+      sp.message(`chunking file: ${data.index}/${data.totalChunks}`);
+    },
     onChunking: (data) => {
-      for (const chunk of data.chunks) {
-        const bar = progressBar.create(100, 0, {
-          index: chunk.index,
-          hash: hash(ascii.decode(chunk.data)).slice(0, 6),
-          totalSize: bytes.format(chunk.size),
-          uploadedSize: bytes.format(0),
-          speed: bytes.format(0),
-        });
-
-        bar.update(0);
-
-        chunkProgressBars.set(chunk.index, bar);
-      }
+      sp.stop();
+      progressBar.start(100, 0, {
+        uploadedSize: bytes.format(0),
+        totalSize: bytes.format(fileStat.size),
+        uploadedChunks: 0,
+        totalChunks: data.totalChunks,
+      });
     },
     onChunkEvent: (data) => {
-      const bar = chunkProgressBars.get(data.chunkIndex);
-
-      if (!bar) {
-        return;
-      }
-
       if (data.event === "END_UPLOADING") {
-        bar.update(100, {
+        totalChunksUploaded++;
+        progressBar.update(progressBar.getProgress() * 100, {
           speed: bytes.format(0),
+          uploadedChunks: totalChunksUploaded,
         });
-        bar.stop();
-        chunkProgressBars.delete(data.chunkIndex);
       }
     },
     onProgress: (data) => {
-      const bar = chunkProgressBars.get(data.chunk.index);
-
-      bar?.update(Math.round(data.percentage), {
-        uploadedSize: bytes.format(data.transferred),
-        totalSize: bytes.format(data.chunk.size),
-        speed: bytes.format(data.speed),
-      });
-
       totalBytesUploaded += data.delta;
 
-      mainProgress.update(
-        Math.round((totalBytesUploaded / fileData.length) * 100),
+      progressBar.update(
+        Math.round((totalBytesUploaded / fileStat.size) * 100),
         {
           uploadedSize: bytes.format(totalBytesUploaded),
+          speed: bytes.format(data.speed),
         }
       );
     },
   });
+  const endTime = Date.now();
 
-  chunkProgressBars.forEach((bar) => bar.stop());
-  mainProgress.stop();
+  progressBar.update(100, {
+    uploadedSize: bytes.format(fileStat.size),
+  });
   progressBar.stop();
 
   await user.createFile({
     id: id,
-    hash: fileHash,
     name: Path.basename(filePath),
     parentDirectoryId: uploadDirectory.id || undefined,
-    size: fileData.length,
+    size: fileStat.size,
     chunks: uploadResponse.chunks.map((chunk) => ({
       id: chunk.id,
-      hash: hash(ascii.decode(chunk.data)),
       index: chunk.index,
       size: chunk.size,
     })),
   });
 
   log.success("File uploaded");
+  log.info(`Time taken: ${((endTime - startTime) / 1000).toFixed(1)}s`);
   await askForMessageAcknowledgement();
 }
 

@@ -6,14 +6,17 @@ import { Readable } from "stream";
 import progress_stream from "progress-stream";
 import { chunkString } from "@/utils/chunkString";
 import { ascii } from "@/utils/ascii";
+import fs from "node:fs";
 import { throttleAll } from "promise-throttle-all";
+import { hashFromStream } from "./crypto";
 
 export type DriveOptions = {
   refreshToken: string;
 };
 
 export type CreateRawFileOptions = {
-  data: Uint8Array;
+  stream: Readable;
+  size: number;
   name: string;
   driveId?: string;
   parentDirectoryId?: string;
@@ -27,15 +30,18 @@ export type ChunkEntity = {
   id: string;
   index: number;
   size: number;
-  data: Uint8Array;
+  stream: Readable;
+  createStream: () => Readable;
 };
 
 export type CreateFileOptions = {
-  data: string;
+  filePath: string;
   id: string;
   parentDirectoryId?: string;
   fileDirectoryName?: string;
   maxChunkSize?: number;
+  concurrentChunkUploading?: number;
+  chunkStreamSize?: number;
   onProgress?: (
     progress: progress_stream.Progress & {
       chunk: ChunkEntity;
@@ -45,7 +51,7 @@ export type CreateFileOptions = {
   onChunking?: (data: {
     totalChunks: number;
     size: number;
-    chunks: ChunkEntity[];
+    chunks: Map<number, ChunkEntity>;
   }) => Promise<any> | any;
   onChunkEvent?: (data: {
     event: "START_UPLOADING" | "END_UPLOADING" | "ERROR_UPLOADING";
@@ -53,6 +59,10 @@ export type CreateFileOptions = {
     data?: {
       [key: string]: any;
     };
+  }) => Promise<any> | any;
+  onChunkingProgress?: (data: {
+    index: number;
+    totalChunks: number;
   }) => Promise<any> | any;
 };
 
@@ -115,31 +125,11 @@ export class Drive {
 
     return createResponse.data.id!;
   }
-
   public async createRawFile(options: CreateRawFileOptions) {
     options.mimeType = options.mimeType || "application/octet-stream";
-    options.streamChunkSize =
-      options.streamChunkSize || CONST.DEFAULT_STREAM_CHUNK_SIZE;
-
-    const readable = new Readable();
-    let offset = 0;
-
-    while (true) {
-      if (offset >= options.data.length) {
-        readable.push(null);
-        break;
-      }
-
-      const chunk = options.data.slice(
-        offset,
-        offset + options.streamChunkSize
-      );
-      offset += options.streamChunkSize;
-      readable.push(chunk);
-    }
 
     let progressStream = progress_stream({
-      length: options.data.length,
+      length: options.size,
       time: 100,
     });
 
@@ -147,11 +137,11 @@ export class Drive {
       await options.onProgress?.(progress);
     });
 
-    const readStream = readable.pipe(progressStream);
+    const readStream = options.stream.pipe(progressStream);
 
     const uploadResponse = (await driveQueue.add(async () => {
       await options.onStart?.();
-      return this.drive!.files.create({
+      return this.drive.files.create({
         requestBody: {
           id: options.driveId,
           name: options.name,
@@ -188,39 +178,61 @@ export class Drive {
 
     options.maxChunkSize = options.maxChunkSize || CONST.DEFAULT_MAX_CHUNK_SIZE;
 
-    const rawChunks = chunkString(options.data, options.maxChunkSize);
+    const stat = await fs.promises.stat(options.filePath);
 
-    const chunks = await Promise.all(
-      rawChunks.map(async (chunk, index) => {
-        const id = (await this.generateId())!;
+    const size = stat.size;
 
-        return {
-          index,
-          data: ascii.encode(chunk),
-          size: chunk.length,
-          id,
-        };
-      })
-    );
+    const chunks = new Map<number, ChunkEntity>();
+
+    const totalChunks = Math.ceil(size / options.maxChunkSize);
+    const chunkIds = await this.generateNIds(totalChunks);
+
+    for (let i = 0; i < totalChunks; i++) {
+      const start = i * options.maxChunkSize;
+      const end = Math.min(size, start + options.maxChunkSize) - 1;
+      const chunkSize = end - start + 1;
+      const id = chunkIds?.[i] || (await this.generateId())!;
+
+      function createStream() {
+        return fs.createReadStream(options.filePath, {
+          start,
+          end,
+          highWaterMark:
+            options.chunkStreamSize || CONST.DEFAULT_CHUNK_STREAM_SIZE,
+        });
+      }
+      chunks.set(i, {
+        index: i,
+        id: id,
+        size: chunkSize,
+        stream: createStream(),
+        createStream: createStream,
+      });
+      await options?.onChunkingProgress?.({
+        index: i,
+        totalChunks: totalChunks,
+      });
+    }
 
     await options.onChunking?.({
-      totalChunks: chunks.length,
-      size: options.data.length,
+      totalChunks: chunks.size,
+      size: size,
       chunks: chunks,
     });
 
-    const promisePool = chunks.map((chunk) => {
+    const promisePool = Array.from(chunks).map(([chunkIndex, chunk]) => {
       return async () => {
         const chunkUploadResponse = await this.createRawFile({
           name: chunk.id,
-          data: chunk.data,
+          stream: chunk.stream,
+          size: chunk.size,
           driveId: chunk.id,
           parentDirectoryId: parentDirectoryId,
           onProgress: (progress) => {
             options.onProgress?.({
               ...progress,
               chunk,
-              totalChunks: chunks.length,
+              totalChunks: chunks.size,
             });
           },
           onStart: async () => {
@@ -260,7 +272,7 @@ export class Drive {
     });
 
     const uploadResponse = await throttleAll(
-      CONST.CONCURRENT_CHUNK_UPLOADING,
+      options?.concurrentChunkUploading || CONST.CONCURRENT_CHUNK_UPLOADING,
       promisePool
     );
 
@@ -271,7 +283,6 @@ export class Drive {
         driveId: chunk.driveId,
         index: chunk.info.index,
         size: chunk.info.size,
-        data: chunk.info.data,
         id: chunk.info.id,
       })),
     };
@@ -289,5 +300,31 @@ export class Drive {
     }
 
     return ids.data.ids[0];
+  }
+
+  public async generateNIds(n: number): Promise<string[] | null> {
+    const MAX_IDS_PER_REQUEST = 1000;
+
+    const fetchIds = async (count: number): Promise<string[]> => {
+      const ids = await driveQueue.add(() =>
+        this.drive.files.generateIds({
+          count: Math.min(count, MAX_IDS_PER_REQUEST),
+        })
+      );
+      return ids?.data?.ids || [];
+    };
+
+    const generateIds = async (count: number): Promise<string[]> => {
+      if (count <= 0) return [];
+      const ids = await fetchIds(count);
+      return ids.concat(await generateIds(count - ids.length));
+    };
+
+    try {
+      return await generateIds(n);
+    } catch (error) {
+      console.error("Error generating IDs:", error);
+      return null;
+    }
   }
 }

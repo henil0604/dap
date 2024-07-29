@@ -10,6 +10,9 @@ import { Drive } from "@/utils/drive";
 import { repl } from "@/utils/repl";
 import { User } from "@/utils/user";
 import bytes from "bytes";
+import { Readable } from "stream";
+import fs from "node:fs";
+import { hashFile } from "./utils/crypto";
 
 async function AuthProcess() {
   if (store.getItem(CONST.STORE.REFRESH_TOKEN)) {
@@ -74,7 +77,7 @@ async function AuthProcess() {
 }
 
 logger.info("checking authentication");
-const { drive, user } = await AuthProcess();
+const { user } = await AuthProcess();
 logger.success("auth process complete");
 
 // clear screen

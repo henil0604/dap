@@ -5,7 +5,6 @@ import { Directory } from "@prisma/client";
 
 export type CreateFileOptions = {
   id: string;
-  hash: string;
   name: string;
   size: number;
   parentDirectoryId?: string;
@@ -14,7 +13,6 @@ export type CreateFileOptions = {
 
 export type CreateChunkOptions = {
   id: string;
-  hash: string;
   index: number;
   size: number;
   fileId: string;
@@ -45,8 +43,18 @@ export class User {
     return prisma.directory.create({
       data: {
         name,
-        parentDirectoryId,
-        ownerUsername: this.username,
+        parentDirectory: parentDirectoryId
+          ? {
+              connect: {
+                id: parentDirectoryId,
+              },
+            }
+          : undefined,
+        owner: {
+          connect: {
+            username: this.username,
+          },
+        },
       },
     });
   }
@@ -130,7 +138,6 @@ export class User {
     const file = await prisma.file.create({
       data: {
         id: options.id,
-        hash: options.hash,
         name: options.name,
         size: options.size,
         parentDirectory: options.parentDirectoryId
@@ -157,7 +164,6 @@ export class User {
     return prisma.chunk.create({
       data: {
         id: options.id,
-        hash: options.hash,
         index: options.index,
         size: options.size,
         file: {
