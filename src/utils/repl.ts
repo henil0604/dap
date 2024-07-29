@@ -171,7 +171,7 @@ async function uploadProcess(user: User) {
     onChunkEvent: (data) => {
       if (data.event === "END_UPLOADING") {
         totalChunksUploaded++;
-        progressBar.update(progressBar.getProgress() * 100, {
+        progressBar.update(Math.round(progressBar.getProgress() * 100), {
           speed: bytes.format(0),
           uploadedChunks: totalChunksUploaded,
         });
