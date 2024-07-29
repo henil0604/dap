@@ -43,7 +43,7 @@ model File {
     id String @id
 
     name String
-    size Int
+    size BigInt
 
     chunks Chunk[]
 
@@ -60,7 +60,7 @@ model Chunk {
     id String @id
 
     index Int
-    size  Int
+    size  BigInt
 
     file   File   @relation(fields: [fileId], references: [id])
     fileId String
