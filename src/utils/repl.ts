@@ -147,7 +147,15 @@ async function uploadProcess(user: User) {
   );
 
   let totalBytesUploaded = 0;
+  let totalBytesUploadedDelta = 0;
   let totalChunksUploaded = 0;
+
+  let speedCheckerInterval = setInterval(() => {
+    progressBar.update(Math.round(progressBar.getProgress() * 100), {
+      speed: bytes.format(totalBytesUploadedDelta),
+    });
+    totalBytesUploadedDelta = 0;
+  }, 1000);
 
   sp.start("chunking file");
 
@@ -179,18 +187,19 @@ async function uploadProcess(user: User) {
     },
     onProgress: (data) => {
       totalBytesUploaded += data.delta;
+      totalBytesUploadedDelta += data.delta;
 
       progressBar.update(
         Math.round((totalBytesUploaded / fileStat.size) * 100),
         {
           uploadedSize: bytes.format(totalBytesUploaded),
-          speed: bytes.format(data.speed),
         }
       );
     },
   });
   const endTime = Date.now();
 
+  clearInterval(speedCheckerInterval);
   progressBar.update(100, {
     uploadedSize: bytes.format(fileStat.size),
   });
