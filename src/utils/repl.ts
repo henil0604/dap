@@ -322,6 +322,7 @@ async function downloadProcess(user: User) {
 
   let totalBytesDownloaded = 0;
   let totalChunksDownloaded = 0;
+  let totalBytesUploadedDelta = 0;
 
   const fullFilePath = Path.join(directory, file.name);
   const destinationFileStream = fs.createWriteStream(fullFilePath);
@@ -344,6 +345,13 @@ async function downloadProcess(user: User) {
     downloadedSize: bytes.format(0),
   });
 
+  let speedCheckerInterval = setInterval(() => {
+    progressBar.update(Math.round(progressBar.getProgress() * 100), {
+      speed: bytes.format(totalBytesUploadedDelta),
+    });
+    totalBytesUploadedDelta = 0;
+  }, 1000);
+
   const startTime = Date.now();
   const downloadResponse = await user.drive.downloadFile({
     id: fileInfo.id,
@@ -357,6 +365,8 @@ async function downloadProcess(user: User) {
     }),
     onProgress: (progress) => {
       totalBytesDownloaded += progress.delta;
+      totalBytesUploadedDelta += progress.delta;
+
       progressBar.update(
         Math.round((totalBytesDownloaded / totalFileSize) * 100),
         {
@@ -375,6 +385,7 @@ async function downloadProcess(user: User) {
   });
   const endTime = Date.now();
 
+  clearInterval(speedCheckerInterval);
   progressBar.update(100, {
     downloadedSize: bytes.format(totalFileSize),
   });
