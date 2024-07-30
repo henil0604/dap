@@ -147,6 +147,11 @@ export class User {
               },
             }
           : undefined,
+        owner: {
+          connect: {
+            username: this.username,
+          },
+        },
       },
     });
 
@@ -177,8 +182,57 @@ export class User {
 
   public async getFile(id: string) {
     return prisma.file.findUnique({
-      where: { id },
-      include: { chunks: true, parentDirectory: true },
+      where: {
+        id,
+        owner: {
+          username: this.username,
+        },
+      },
+      include: {
+        chunks: {
+          orderBy: {
+            index: "asc",
+          },
+        },
+        parentDirectory: true,
+      },
     });
+  }
+
+  public async getAllFiles() {
+    return prisma.file.findMany({
+      where: {
+        owner: {
+          username: this.username,
+        },
+      },
+      include: {
+        chunks: true,
+        parentDirectory: true,
+      },
+    });
+  }
+
+  public async getAllFilesWithAbsolutePath() {
+    const files = await this.getAllFiles();
+
+    const directories = await this.getDirectoriesWithAbsolutePath();
+
+    const filesWithAbsolutePath = files.map((file) => {
+      const directory = directories.find(
+        (dir) => dir.id === file.parentDirectoryId
+      );
+
+      const absolutePath = directory
+        ? Path.join(directory.absolutePath, file.name)
+        : `/${file.name}`;
+
+      return {
+        ...file,
+        absolutePath,
+      };
+    });
+
+    return filesWithAbsolutePath;
   }
 }

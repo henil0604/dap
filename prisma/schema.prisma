@@ -30,12 +30,12 @@ model Directory {
     files          File[]
     subDirectories Directory[] @relation("SubDirectory")
 
-    parentDirectory   Directory? @relation("SubDirectory", fields: [parentDirectoryId], references: [id])
+    parentDirectory   Directory? @relation("SubDirectory", fields: [parentDirectoryId], references: [id], onDelete: Cascade)
     parentDirectoryId String?
 
     createdAt DateTime @default(now())
 
-    owner         User   @relation(fields: [ownerUsername], references: [username])
+    owner         User   @relation(fields: [ownerUsername], references: [username], onDelete: Cascade)
     ownerUsername String
 }
 
@@ -47,10 +47,10 @@ model File {
 
     chunks Chunk[]
 
-    parentDirectory   Directory? @relation(fields: [parentDirectoryId], references: [id])
+    parentDirectory   Directory? @relation(fields: [parentDirectoryId], references: [id], onDelete: Cascade)
     parentDirectoryId String?
 
-    owner         User?   @relation(fields: [ownerUsername], references: [username])
+    owner         User?   @relation(fields: [ownerUsername], references: [username], onDelete: Cascade)
     ownerUsername String?
 
     createdAt DateTime @default(now())
@@ -62,7 +62,7 @@ model Chunk {
     index Int
     size  BigInt
 
-    file   File   @relation(fields: [fileId], references: [id])
+    file   File   @relation(fields: [fileId], references: [id], onDelete: Cascade)
     fileId String
 
     createdAt DateTime @default(now())

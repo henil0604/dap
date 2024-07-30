@@ -102,6 +102,7 @@ while (!exitRepl) {
       await repl.createDirectoryProcess(user);
       break;
     case repl.ActionChoice.DOWNLOAD:
+      await repl.downloadProcess(user);
       break;
   }
 }

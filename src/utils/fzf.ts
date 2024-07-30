@@ -3,6 +3,7 @@ import Path from "node:path";
 
 type Options = {
   cwd?: string;
+  message?: string;
 };
 
 export async function fzf(
@@ -17,10 +18,16 @@ export async function fzf(
   list: string | string[],
   options?: Options
 ): Promise<string | null> {
+  const fzfCommand = `fzf --border --layout=reverse ${
+    options?.message?.trim()
+      ? `--header-first --header \"${options.message.replace('"', '\\"')}\"`
+      : ""
+  } -i`;
+
   const command =
     typeof list === "string"
-      ? `${list} | fzf -i`
-      : `echo "${list.join("\n").replaceAll('"', '\\"')}" | fzf -i`;
+      ? `${list} | ${fzfCommand}`
+      : `echo "${list.join("\n").replaceAll('"', '\\"')}" | ${fzfCommand}`;
 
   try {
     const item = execSync(command, {

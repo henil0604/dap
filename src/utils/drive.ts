@@ -2,13 +2,12 @@ import { google } from "googleapis";
 import { getGoogleAuth } from "./getGoogleAuth";
 import { driveQueue } from "./queue";
 import { CONST } from "@/const";
-import { Readable } from "stream";
+import { Readable, Writable } from "stream";
 import progress_stream from "progress-stream";
-import { chunkString } from "@/utils/chunkString";
-import { ascii } from "@/utils/ascii";
 import fs from "node:fs";
 import { throttleAll } from "promise-throttle-all";
-import { hashFromStream } from "./crypto";
+import { shuffleArray } from "./shuffleArray";
+import tempfile from "tempfile";
 
 export type DriveOptions = {
   refreshToken: string;
@@ -72,6 +71,40 @@ export type CreateDirectoryOptions = {
   parentDirectoryId?: string;
 };
 
+export type DownloadFileOptions = {
+  id: string;
+  size: number;
+  chunks: {
+    id: string;
+    size: number;
+  }[];
+  stream: Writable;
+  onProgress?: (
+    progress: progress_stream.Progress & {
+      chunk: {
+        id: string;
+        size: number;
+        index: number;
+      };
+    }
+  ) => Promise<any> | any;
+  onChunkEvent?: (data: {
+    event: "END_DOWNLOADING" | "START_DOWNLOADING";
+    index: number;
+    id: string;
+    data?: {
+      [key: string]: any;
+    };
+  }) => Promise<any> | any;
+};
+
+export type DownloadRawFileOptions = {
+  id: string;
+  size: number;
+  stream: fs.WriteStream;
+  onProgress?: (progress: progress_stream.Progress) => Promise<any> | any;
+};
+
 export class Drive {
   refreshToken: string;
   auth: ReturnType<typeof getGoogleAuth>;
@@ -125,6 +158,7 @@ export class Drive {
 
     return createResponse.data.id!;
   }
+
   public async createRawFile(options: CreateRawFileOptions) {
     options.mimeType = options.mimeType || "application/octet-stream";
 
@@ -220,56 +254,58 @@ export class Drive {
       chunks: chunks,
     });
 
-    const promisePool = Array.from(chunks).map(([chunkIndex, chunk]) => {
-      return async () => {
-        const chunkUploadResponse = await this.createRawFile({
-          name: chunk.id,
-          stream: chunk.stream,
-          size: chunk.size,
-          driveId: chunk.id,
-          parentDirectoryId: parentDirectoryId,
-          onProgress: (progress) => {
-            options.onProgress?.({
-              ...progress,
-              chunk,
-              totalChunks: chunks.size,
-            });
-          },
-          onStart: async () => {
+    const promisePool = shuffleArray(Array.from(chunks)).map(
+      ([chunkIndex, chunk]) => {
+        return async () => {
+          const chunkUploadResponse = await this.createRawFile({
+            name: chunk.id,
+            stream: chunk.stream,
+            size: chunk.size,
+            driveId: chunk.id,
+            parentDirectoryId: parentDirectoryId,
+            onProgress: (progress) => {
+              options.onProgress?.({
+                ...progress,
+                chunk,
+                totalChunks: chunks.size,
+              });
+            },
+            onStart: async () => {
+              await options.onChunkEvent?.({
+                chunkIndex: chunk.index,
+                event: "START_UPLOADING",
+              });
+            },
+          });
+
+          if (
+            !chunkUploadResponse ||
+            "driveId" in chunkUploadResponse === false
+          ) {
             await options.onChunkEvent?.({
               chunkIndex: chunk.index,
-              event: "START_UPLOADING",
+              event: "ERROR_UPLOADING",
             });
-          },
-        });
 
-        if (
-          !chunkUploadResponse ||
-          "driveId" in chunkUploadResponse === false
-        ) {
+            return {
+              error: true,
+              info: chunk,
+            };
+          }
+
           await options.onChunkEvent?.({
             chunkIndex: chunk.index,
-            event: "ERROR_UPLOADING",
+            event: "END_UPLOADING",
           });
 
           return {
-            error: true,
+            error: false,
+            driveId: chunkUploadResponse.driveId || null,
             info: chunk,
           };
-        }
-
-        await options.onChunkEvent?.({
-          chunkIndex: chunk.index,
-          event: "END_UPLOADING",
-        });
-
-        return {
-          error: false,
-          driveId: chunkUploadResponse.driveId || null,
-          info: chunk,
         };
-      };
-    });
+      }
+    );
 
     const uploadResponse = await throttleAll(
       options?.concurrentChunkUploading || CONST.CONCURRENT_CHUNK_UPLOADING,
@@ -326,5 +362,130 @@ export class Drive {
       console.error("Error generating IDs:", error);
       return null;
     }
+  }
+
+  public async downloadRawFile(options: DownloadRawFileOptions) {
+    const downloadResponse = await driveQueue.add(
+      async () =>
+        await this.drive.files.get(
+          {
+            fileId: options.id,
+            alt: "media",
+          },
+          {
+            responseType: "stream",
+          }
+        )
+    );
+
+    const progressStream = progress_stream({
+      length: options.size,
+      time: 100,
+    });
+
+    progressStream.on("progress", async function (progress) {
+      await options.onProgress?.(progress);
+    });
+
+    if (!downloadResponse) {
+      return null;
+    }
+
+    const stream = downloadResponse.data;
+
+    return new Promise((resolve, reject) => {
+      stream.pipe(progressStream).pipe(options.stream);
+      stream.on("end", () => {
+        return resolve({
+          id: options.id,
+        });
+      });
+      stream.on("error", reject);
+    });
+  }
+
+  public async downloadFile(options: DownloadFileOptions) {
+    const chunkPaths = options.chunks.map((chunk) => {
+      return tempfile({
+        extension: ".dap",
+      });
+    });
+
+    const chunkStreams = options.chunks.map((chunk, index) => {
+      return fs.createWriteStream(chunkPaths[index]);
+    });
+
+    const promisePool = options.chunks.map((chunk, index) => {
+      return async () => {
+        await options.onChunkEvent?.({
+          event: "START_DOWNLOADING",
+          index: index,
+          id: chunk.id,
+        });
+
+        await this.downloadRawFile({
+          id: chunk.id,
+          size: chunk.size,
+          onProgress: (progress) => {
+            options.onProgress?.({
+              ...progress,
+              chunk: {
+                id: chunk.id,
+                size: chunk.size,
+                index: index,
+              },
+            });
+          },
+          stream: chunkStreams[index],
+        });
+
+        await options.onChunkEvent?.({
+          event: "END_DOWNLOADING",
+          index: index,
+          id: chunk.id,
+        });
+
+        return {
+          id: chunk,
+          file: chunkPaths[index],
+        };
+      };
+    });
+
+    await throttleAll(CONST.CONCURRENT_CHUNK_DOWNLOADING, promisePool);
+
+    const chunkReadStreams = chunkPaths.map((path) => {
+      return fs.createReadStream(path);
+    });
+
+    const mergeFiles = (
+      streams: Readable[],
+      outputStream: Writable
+    ): Promise<void> => {
+      return new Promise((resolve, reject) => {
+        const pipeNext = (index: number) => {
+          if (index >= streams.length) {
+            outputStream.end();
+            resolve();
+            return;
+          }
+
+          const currentStream = streams[index];
+          currentStream.pipe(outputStream, { end: false });
+          currentStream.on("end", () => pipeNext(index + 1));
+          currentStream.on("error", reject);
+        };
+
+        pipeNext(0);
+      });
+    };
+
+    await mergeFiles(chunkReadStreams, options.stream);
+
+    await Promise.all(chunkPaths.map((path) => fs.promises.unlink(path)));
+
+    return {
+      id: options.id,
+    };
   }
 }

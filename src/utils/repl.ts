@@ -43,6 +43,16 @@ async function askForFile(path: string): Promise<string | null> {
 
   return fzf(command, {
     cwd: path,
+    message: "Select local file",
+  });
+}
+
+async function askForDirectory(path: string): Promise<string | null> {
+  const command = `find . $(if [ -f .gitignore ]; then cat .gitignore | grep -v '^#' | grep -v '^$' | sed 's|^|./|' | sed 's|$|/*|' | xargs -I {} echo "-ipath \\"{}\\" -prune -o"; fi) -type d -print`;
+
+  return fzf(command, {
+    cwd: path,
+    message: "Select local directory",
   });
 }
 
@@ -66,7 +76,12 @@ async function askForDriveDirectory(
 
   directoryPaths.unshift({ id: "", path: "/", name: "Root" });
 
-  const selectedPath = await fzf(directoryPaths.map((d) => d.path));
+  const selectedPath = await fzf(
+    directoryPaths.map((d) => d.path),
+    {
+      message: "Select remote directory",
+    }
+  );
 
   if (!selectedPath) {
     return { id: "", absolutePath: "/" };
@@ -81,6 +96,35 @@ async function askForDriveDirectory(
   return { id: selectedDirectory.id, absolutePath: selectedDirectory.path };
 }
 
+async function askForDriveFile(user: User) {
+  const allFiles = await user.getAllFilesWithAbsolutePath();
+
+  const filesPaths = allFiles.map((f) => ({
+    id: f.id,
+    path: f.absolutePath,
+    name: f.name,
+  }));
+
+  const selectedPath = await fzf(
+    filesPaths.map((f) => f.path),
+    {
+      message: "Select remote file",
+    }
+  );
+
+  if (!selectedPath) {
+    return null;
+  }
+
+  const selectedFile = filesPaths.find((f) => f.path === selectedPath);
+
+  if (!selectedFile) {
+    return null;
+  }
+
+  return selectedFile;
+}
+
 export function clearScreen(user: User) {
   console.clear();
   log.info(`Logged in as ${chalk.cyanBright(user.username)}`);
@@ -90,7 +134,6 @@ async function uploadProcess(user: User) {
   const filePath = await askForFile(CONST.DEFAULT_UPLOAD_PROMPT_PATH);
 
   if (!filePath) {
-    log.error("No file selected");
     return;
   }
 
@@ -222,8 +265,131 @@ async function uploadProcess(user: User) {
   await askForMessageAcknowledgement();
 }
 
-async function askForMessageAcknowledgement() {
-  return text({ message: "Press any key to continue..." });
+async function downloadProcess(user: User) {
+  const file = await askForDriveFile(user);
+
+  if (!file) {
+    return;
+  }
+
+  log.info(`Selected file ${chalk.cyanBright(file.path)}`);
+
+  const directory = await askForDirectory(CONST.DEFAULT_DOWNLOAD_PROMPT_PATH);
+
+  if (!directory) {
+    return;
+  }
+
+  log.info(`Selected directory ${chalk.yellowBright(directory)}`);
+
+  const sp = spinner();
+
+  sp.start("Fetching file info");
+
+  const fileInfo = await user.getFile(file.id);
+
+  if (!fileInfo) {
+    await askForMessageAcknowledgement("File not found");
+    return;
+  }
+
+  sp.stop();
+
+  log.info(`Size: ${bytes.format(Number.parseInt(fileInfo.size.toString()))}`);
+
+  const shouldDownload = await confirm({
+    message: "Continue to download?",
+    initialValue: true,
+  });
+
+  if (isCancel(shouldDownload) || !shouldDownload) {
+    log.warn("Download Canceled");
+    await askForMessageAcknowledgement();
+    return;
+  }
+
+  clearScreen(user);
+
+  const totalFileSize = Number.parseInt(fileInfo.size.toString());
+
+  log.info(`ID: ${fileInfo.id}`);
+  log.info(`Name: ${chalk.cyanBright(file.name)}`);
+  log.info(`Remote Path: ${chalk.greenBright(file.path)}`);
+  log.info(`Save Path: ${chalk.yellowBright(directory)}`);
+  log.info(`Total Chunks: ${fileInfo.chunks.length}`);
+  log.info(`Size: ${bytes.format(totalFileSize)}`);
+  log.info(`PID: ${process.pid}`);
+
+  let totalBytesDownloaded = 0;
+  let totalChunksDownloaded = 0;
+
+  const fullFilePath = Path.join(directory, file.name);
+  const destinationFileStream = fs.createWriteStream(fullFilePath);
+
+  const progressBar = new cliProgress.SingleBar(
+    {
+      clearOnComplete: false,
+      hideCursor: false,
+      format:
+        "{bar} | {value}% | {downloadedChunks}/{totalChunks} | {downloadedSize}/{totalSize} | {speed}/s",
+    },
+    cliProgress.Presets.rect
+  );
+
+  progressBar.start(100, 0, {
+    downloadedChunks: 0,
+    totalChunks: fileInfo.chunks.length,
+    speed: bytes.format(0),
+    totalSize: bytes.format(totalFileSize),
+    downloadedSize: bytes.format(0),
+  });
+
+  const startTime = Date.now();
+  const downloadResponse = await user.drive.downloadFile({
+    id: fileInfo.id,
+    stream: destinationFileStream,
+    size: parseInt(fileInfo.size.toString()),
+    chunks: fileInfo.chunks.map((chunk) => {
+      return {
+        id: chunk.id,
+        size: parseInt(chunk.size.toString()),
+      };
+    }),
+    onProgress: (progress) => {
+      totalBytesDownloaded += progress.delta;
+      progressBar.update(
+        Math.round((totalBytesDownloaded / totalFileSize) * 100),
+        {
+          downloadedSize: bytes.format(totalBytesDownloaded),
+        }
+      );
+    },
+    onChunkEvent: (data) => {
+      if (data.event === "END_DOWNLOADING") {
+        totalChunksDownloaded++;
+        progressBar.update(progressBar.getProgress() * 100, {
+          downloadedChunks: totalChunksDownloaded,
+        });
+      }
+    },
+  });
+  const endTime = Date.now();
+
+  progressBar.update(100, {
+    downloadedSize: bytes.format(totalFileSize),
+  });
+  progressBar.stop();
+
+  log.success("File downloaded");
+  log.info(`Time taken: ${((endTime - startTime) / 1000).toFixed(1)}s`);
+  await askForMessageAcknowledgement();
+}
+
+async function askForMessageAcknowledgement(message?: string) {
+  return text({
+    message: message || "Press enter to continue...",
+    placeholder: "Press enter",
+  });
 }
 
 export async function createDirectoryProcess(user: User) {
@@ -300,4 +466,5 @@ export const repl = {
   ActionChoice,
   clearScreen,
   createDirectoryProcess,
+  downloadProcess,
 };
